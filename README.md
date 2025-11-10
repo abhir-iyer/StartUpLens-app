@@ -56,7 +56,7 @@ Create `.streamlit/secrets.toml` with your MongoDB URI:
 
 ```toml
 [mongo]
-uri = "mongodb+srv://abhiriyer_db_user:3Ma4WcS4TMTvVp4T@startuplenscluster.p5eyklh.mongodb.net/"
+uri = "mongodb+srv://<username>:<password>@startuplenscluster.p5eyklh.mongodb.net/"
 ```
 
 5. **Run the application:**
