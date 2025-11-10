@@ -1,12 +1,12 @@
 # StartUpLens Web Application
 # Team: Abhir Iyer [AI], Krishna Kishore [KK], Nandini Patel [NP]
-# 
-# AI Assistance: Application structure and Streamlit components created with 
+#
+# AI Assistance: Application structure and Streamlit components created with
 # GitHub Copilot assistance, accessed on January 9, 2025
+# Additional fixes: Removed pandas dependency for Streamlit Cloud (Python 3.13)
 
 import streamlit as st
 from pymongo import MongoClient
-import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
@@ -60,10 +60,10 @@ def get_database():
             st.error("❌ MongoDB connection string not found!")
             st.info("Please set up .streamlit/secrets.toml for local development or add secrets in Streamlit Cloud.")
             st.stop()
-        
+
         client = MongoClient(MONGO_URI)
         db = client["StartUpLensDB"]
-        
+
         # Test connection
         client.server_info()
         return db
@@ -83,7 +83,7 @@ st.sidebar.markdown("### Navigation")
 
 page = st.sidebar.radio(
     "Go to:",
-    ["📊 Dashboard", "🔍 Search Startups", "➕ Add Startup", 
+    ["📊 Dashboard", "🔍 Search Startups", "➕ Add Startup",
      "✏️ Update Startup", "🗑️ Delete Startup"],
     label_visibility="collapsed"
 )
@@ -98,14 +98,14 @@ st.sidebar.markdown("• Nandini Patel [NP]")
 if page == "📊 Dashboard":
     st.markdown('<p class="main-header">📊 StartUpLens Dashboard</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Exploring Global Startup Funding Networks</p>', unsafe_allow_html=True)
-    
+
     # [NP] Key Metrics Row
     col1, col2, col3, col4 = st.columns(4)
-    
+
     with col1:
         total_startups = startups_collection.estimated_document_count()
         st.metric("Total Startups", f"{total_startups:,}")
-    
+
     with col2:
         # [NP] Calculate total funding
         pipeline = [
@@ -115,22 +115,21 @@ if page == "📊 Dashboard":
         result = list(startups_collection.aggregate(pipeline))
         total_funding = result[0]['total'] if result else 0
         st.metric("Total Funding", f"${total_funding/1e9:.2f}B")
-    
+
     with col3:
         # [NP] Count unique industries
         industries = startups_collection.distinct("industry")
         st.metric("Industries", len([i for i in industries if i]))
-    
+
     with col4:
         # [NP] Count unique countries
         countries = startups_collection.distinct("country")
         st.metric("Countries", len([c for c in countries if c]))
-    
+
     st.markdown("---")
-    
+
     # [NP] Visualization 1: Funding by Industry (Top 10)
     st.subheader("💰 Total Funding by Industry (Top 10)")
-    
     pipeline = [
         {"$unwind": "$funding_rounds"},
         {"$group": {
@@ -140,97 +139,84 @@ if page == "📊 Dashboard":
         {"$sort": {"totalRaised": -1}},
         {"$limit": 10}
     ]
-    
     industry_data = list(startups_collection.aggregate(pipeline))
-    
     if industry_data:
-        df_industry = pd.DataFrame(industry_data)
-        df_industry['totalRaised'] = df_industry['totalRaised'] / 1e9  # Convert to billions
-        df_industry.columns = ['Industry', 'Total Raised ($B)']
-        
-        fig1 = px.bar(
-            df_industry, 
-            x='Industry', 
-            y='Total Raised ($B)',
-            title='Top 10 Industries by Total Funding',
-            color='Total Raised ($B)',
-            color_continuous_scale='Blues'
+        x_industry = [d.get("_id") for d in industry_data]
+        y_billion = [(d.get("totalRaised", 0) or 0) / 1e9 for d in industry_data]
+
+        fig1 = go.Figure(
+            data=[go.Bar(x=x_industry, y=y_billion, hovertemplate="Industry: %{x}<br>Total: %{y:.2f} B<br><extra></extra>")]
         )
-        fig1.update_layout(height=400, showlegend=False)
+        fig1.update_layout(
+            title="Top 10 Industries by Total Funding",
+            xaxis_title="Industry",
+            yaxis_title="Total Raised ($B)",
+            height=400,
+            showlegend=False
+        )
         st.plotly_chart(fig1, use_container_width=True)
-    
+
     # [NP] Visualization 2 & 3 in columns
     col_left, col_right = st.columns(2)
-    
+
     with col_left:
         # [NP] Visualization 2: Yearly Funding Trend
         st.subheader("📈 Yearly Funding Trend")
-        
         pipeline = [
             {"$unwind": "$funding_rounds"},
             {"$addFields": {"year": {"$substr": ["$funding_rounds.date", 0, 4]}}},
             {"$match": {"year": {"$regex": "^[0-9]{4}$"}}},
-            {"$group": {
-                "_id": "$year",
-                "total": {"$sum": {"$ifNull": ["$funding_rounds.amount", 0]}}
-            }},
+            {"$group": {"_id": "$year", "total": {"$sum": {"$ifNull": ["$funding_rounds.amount", 0]}}}},
             {"$sort": {"_id": 1}},
-            {"$limit": 30}  # Last 30 years
+            {"$limit": 30}
         ]
-        
         yearly_data = list(startups_collection.aggregate(pipeline))
-        
         if yearly_data:
-            df_yearly = pd.DataFrame(yearly_data)
-            df_yearly['total'] = df_yearly['total'] / 1e9
-            df_yearly.columns = ['Year', 'Total ($B)']
-            
-            fig2 = px.line(
-                df_yearly,
-                x='Year',
-                y='Total ($B)',
-                title='Total Funding Over Time',
-                markers=True
+            x_years = [d.get("_id") for d in yearly_data]
+            y_billion = [(d.get("total", 0) or 0) / 1e9 for d in yearly_data]
+
+            fig2 = go.Figure(
+                data=[go.Scatter(x=x_years, y=y_billion, mode="lines+markers",
+                                 hovertemplate="Year: %{x}<br>Total: %{y:.2f} B<br><extra></extra>")]
             )
-            fig2.update_layout(height=350)
+            fig2.update_layout(
+                title="Total Funding Over Time",
+                xaxis_title="Year",
+                yaxis_title="Total ($B)",
+                height=350
+            )
             st.plotly_chart(fig2, use_container_width=True)
-    
+
     with col_right:
         # [NP] Visualization 3: Top 10 Countries
         st.subheader("🌍 Top 10 Countries by Funding")
-        
         pipeline = [
             {"$unwind": "$funding_rounds"},
-            {"$group": {
-                "_id": {"$ifNull": ["$country", "unknown"]},
-                "total": {"$sum": {"$ifNull": ["$funding_rounds.amount", 0]}}
-            }},
+            {"$group": {"_id": {"$ifNull": ["$country", "unknown"]},
+                        "total": {"$sum": {"$ifNull": ["$funding_rounds.amount", 0]}}}},
             {"$sort": {"total": -1}},
             {"$limit": 10}
         ]
-        
         country_data = list(startups_collection.aggregate(pipeline))
-        
         if country_data:
-            df_country = pd.DataFrame(country_data)
-            df_country['total'] = df_country['total'] / 1e9
-            df_country.columns = ['Country', 'Total ($B)']
-            
-            fig3 = px.bar(
-                df_country,
-                y='Country',
-                x='Total ($B)',
-                title='Top Countries by Total Funding',
-                orientation='h',
-                color='Total ($B)',
-                color_continuous_scale='Viridis'
+            y_countries = [d.get("_id") for d in country_data]
+            x_billion = [(d.get("total", 0) or 0) / 1e9 for d in country_data]
+
+            fig3 = go.Figure(
+                data=[go.Bar(y=y_countries, x=x_billion, orientation="h",
+                             hovertemplate="Country: %{y}<br>Total: %{x:.2f} B<br><extra></extra>")]
             )
-            fig3.update_layout(height=350, showlegend=False)
+            fig3.update_layout(
+                title="Top Countries by Total Funding",
+                xaxis_title="Total ($B)",
+                yaxis_title="Country",
+                height=350,
+                showlegend=False
+            )
             st.plotly_chart(fig3, use_container_width=True)
-    
+
     # [NP] Visualization 4: Round Type Distribution
     st.subheader("📊 Funding Round Distribution")
-    
     pipeline = [
         {"$unwind": "$funding_rounds"},
         {"$group": {
@@ -240,79 +226,71 @@ if page == "📊 Dashboard":
         {"$sort": {"count": -1}},
         {"$limit": 8}
     ]
-    
     round_data = list(startups_collection.aggregate(pipeline))
-    
     if round_data:
-        df_rounds = pd.DataFrame(round_data)
-        df_rounds.columns = ['Round Type', 'Count']
-        
-        fig4 = px.pie(
-            df_rounds,
-            values='Count',
-            names='Round Type',
-            title='Distribution of Funding Round Types',
-            hole=0.4
+        labels = [d.get("_id") for d in round_data]
+        values = [d.get("count", 0) or 0 for d in round_data]
+
+        fig4 = go.Figure(
+            data=[go.Pie(labels=labels, values=values, hole=0.4,
+                         hovertemplate="%{label}: %{value} rounds<extra></extra>")]
         )
-        fig4.update_layout(height=400)
+        fig4.update_layout(title="Distribution of Funding Round Types", height=400)
         st.plotly_chart(fig4, use_container_width=True)
 
 # ==================== PAGE: SEARCH STARTUPS ====================
 elif page == "🔍 Search Startups":
     st.markdown('<p class="main-header">🔍 Search Startups</p>', unsafe_allow_html=True)
-    
+
     # [KK] Search and Filter Section
     col1, col2, col3 = st.columns(3)
-    
+
     with col1:
         search_name = st.text_input("🔎 Search by Name", placeholder="Enter startup name...")
-    
+
     with col2:
         industries = ["All"] + sorted([i for i in startups_collection.distinct("industry") if i])
         selected_industry = st.selectbox("Industry Filter", industries)
-    
+
     with col3:
         countries = ["All"] + sorted([c for c in startups_collection.distinct("country") if c])
         selected_country = st.selectbox("Country Filter", countries)
-    
+
     # [KK] Build query
     query = {}
-    
     if search_name:
         query["startup_name"] = {"$regex": search_name, "$options": "i"}
-    
     if selected_industry != "All":
         query["industry"] = selected_industry
-    
     if selected_country != "All":
         query["country"] = selected_country
-    
+
     # [KK] Execute search
     results = list(startups_collection.find(query).limit(50))
-    
+
     st.markdown(f"### Found {len(results)} startups")
-    
+
     if results:
         for startup in results:
             with st.expander(f"🚀 {startup.get('startup_name', 'Unknown')} - {startup.get('industry', 'N/A')}"):
                 col1, col2 = st.columns(2)
-                
+
                 with col1:
                     st.markdown(f"**Country:** {startup.get('country', 'N/A')}")
                     st.markdown(f"**Founded:** {startup.get('founded_year', 'N/A')}")
                     st.markdown(f"**Status:** {startup.get('status', 'N/A')}")
-                    
+
                     founders = startup.get('founders', [])
                     if founders:
                         st.markdown(f"**Founders:** {', '.join(founders[:3])}")
-                
+
                 with col2:
                     funding_rounds = startup.get('funding_rounds', [])
                     if funding_rounds:
                         total_funding = sum(r.get('amount', 0) for r in funding_rounds)
                         st.markdown(f"**Total Funding:** ${total_funding:,.0f}")
                         st.markdown(f"**Funding Rounds:** {len(funding_rounds)}")
-                        
+
                         latest_round = funding_rounds[-1]
                         st.markdown(f"**Latest Round:** {latest_round.get('round_type', 'N/A')}")
                         st.markdown(f"**Latest Amount:** ${latest_round.get('amount', 0):,.0f}")
@@ -322,43 +300,43 @@ elif page == "🔍 Search Startups":
 # ==================== PAGE: ADD STARTUP ====================
 elif page == "➕ Add Startup":
     st.markdown('<p class="main-header">➕ Add New Startup</p>', unsafe_allow_html=True)
-    
+
     # [AI] Form for adding new startup
     with st.form("add_startup_form"):
         st.subheader("Basic Information")
-        
+
         col1, col2 = st.columns(2)
-        
+
         with col1:
             startup_name = st.text_input("Startup Name *", placeholder="e.g., TechVenture AI")
             industry = st.text_input("Industry *", placeholder="e.g., ai, software, biotech")
             country = st.text_input("Country Code *", placeholder="e.g., USA, GBR, IND")
-        
+
         with col2:
             founded_year = st.number_input("Founded Year *", min_value=1900, max_value=2030, value=2024)
             status = st.selectbox("Status *", ["Seed", "Series A", "Series B", "Series C+", "Acquired", "Active"])
             founders_input = st.text_input("Founders (comma-separated)", placeholder="John Doe, Jane Smith")
-        
+
         st.markdown("---")
         st.subheader("Initial Funding Round (Optional)")
-        
+
         col3, col4, col5 = st.columns(3)
-        
+
         with col3:
             round_type = st.selectbox("Round Type", ["", "Seed", "Angel", "Series A", "Series B", "Series C+", "Venture"])
-        
+
         with col4:
             amount = st.number_input("Amount (USD)", min_value=0, value=0, step=100000)
-        
+
         with col5:
             valuation = st.number_input("Valuation (USD)", min_value=0, value=0, step=1000000)
-        
+
         funding_date = st.date_input("Funding Date", value=datetime.now())
         investors_input = st.text_input("Investors (comma-separated)", placeholder="Sequoia Capital, Y Combinator")
-        
+
         # [AI] Submit button
         submitted = st.form_submit_button("Add Startup", type="primary", use_container_width=True)
-        
+
         if submitted:
             # [AI] Validate required fields
             if not startup_name or not industry or not country:
@@ -374,7 +352,7 @@ elif page == "➕ Add Startup":
                     "founders": [f.strip() for f in founders_input.split(",")] if founders_input else [],
                     "funding_rounds": []
                 }
-                
+
                 # [AI] Add funding round if provided
                 if round_type and amount > 0:
                     funding_round = {
@@ -385,7 +363,7 @@ elif page == "➕ Add Startup":
                         "investors": [i.strip() for i in investors_input.split(",")] if investors_input else []
                     }
                     new_startup["funding_rounds"].append(funding_round)
-                
+
                 try:
                     # [AI] Insert into database
                     result = startups_collection.insert_one(new_startup)
@@ -398,37 +376,38 @@ elif page == "➕ Add Startup":
 # ==================== PAGE: UPDATE STARTUP ====================
 elif page == "✏️ Update Startup":
     st.markdown('<p class="main-header">✏️ Update Startup</p>', unsafe_allow_html=True)
-    
+
     # [NP] Search for startup to update
     search_update = st.text_input("🔎 Search startup to update", placeholder="Enter startup name...")
-    
+
     if search_update:
         # [NP] Find matching startups
         matches = list(startups_collection.find(
             {"startup_name": {"$regex": search_update, "$options": "i"}},
             limit=10
         ))
-        
+
         if matches:
             startup_names = [s['startup_name'] for s in matches]
             selected_startup = st.selectbox("Select Startup", startup_names)
-            
+
             if selected_startup:
                 # [NP] Get full startup document
                 startup = startups_collection.find_one({"startup_name": selected_startup})
-                
+
                 st.markdown("---")
                 st.subheader(f"Updating: {startup['startup_name']}")
-                
+
                 # [NP] Update Status
                 with st.form("update_status_form"):
                     st.markdown("#### Update Status")
-                    new_status = st.selectbox(
-                        "New Status",
-                        ["Seed", "Series A", "Series B", "Series C+", "Acquired", "Inactive"],
-                        index=["Seed", "Series A", "Series B", "Series C+", "Acquired", "Inactive"].index(startup.get('status', 'Seed')) if startup.get('status') in ["Seed", "Series A", "Series B", "Series C+", "Acquired", "Inactive"] else 0
-                    )
-                    
+
+                    status_choices = ["Seed", "Series A", "Series B", "Series C+", "Acquired", "Inactive"]
+                    current_status = startup.get('status')
+                    default_index = status_choices.index(current_status) if current_status in status_choices else 0
+
+                    new_status = st.selectbox("New Status", status_choices, index=default_index)
+
                     if st.form_submit_button("Update Status"):
                         try:
                             startups_collection.update_one(
@@ -438,27 +417,27 @@ elif page == "✏️ Update Startup":
                             st.success(f"✅ Status updated to: {new_status}")
                         except Exception as e:
                             st.error(f"❌ Error: {str(e)}")
-                
+
                 st.markdown("---")
-                
+
                 # [NP] Add New Funding Round
                 with st.form("add_funding_round_form"):
                     st.markdown("#### Add New Funding Round")
-                    
+
                     col1, col2, col3 = st.columns(3)
-                    
+
                     with col1:
                         new_round_type = st.selectbox("Round Type", ["Seed", "Angel", "Series A", "Series B", "Series C+", "Venture"])
-                    
+
                     with col2:
                         new_amount = st.number_input("Amount (USD)", min_value=0, value=1000000, step=100000)
-                    
+
                     with col3:
                         new_valuation = st.number_input("Valuation (USD)", min_value=0, value=0, step=1000000)
-                    
+
                     new_date = st.date_input("Funding Date", value=datetime.now())
                     new_investors = st.text_input("Investors (comma-separated)", placeholder="Investor A, Investor B")
-                    
+
                     if st.form_submit_button("Add Funding Round"):
                         try:
                             new_round = {
@@ -468,7 +447,7 @@ elif page == "✏️ Update Startup":
                                 "valuation": float(new_valuation) if new_valuation > 0 else None,
                                 "investors": [i.strip() for i in new_investors.split(",")] if new_investors else []
                             }
-                            
+
                             startups_collection.update_one(
                                 {"startup_name": selected_startup},
                                 {"$push": {"funding_rounds": new_round}}
@@ -484,51 +463,51 @@ elif page == "✏️ Update Startup":
 elif page == "🗑️ Delete Startup":
     st.markdown('<p class="main-header">🗑️ Delete Startup</p>', unsafe_allow_html=True)
     st.warning("⚠️ **Warning:** This action cannot be undone!")
-    
+
     # [AI] Search for startup to delete
     search_delete = st.text_input("🔎 Search startup to delete", placeholder="Enter startup name...")
-    
+
     if search_delete:
         # [AI] Find matching startups
         matches = list(startups_collection.find(
             {"startup_name": {"$regex": search_delete, "$options": "i"}},
             limit=10
         ))
-        
+
         if matches:
             startup_names = [s['startup_name'] for s in matches]
             selected_delete = st.selectbox("Select Startup to Delete", [""] + startup_names)
-            
+
             if selected_delete:
                 # [AI] Show startup details
                 startup = startups_collection.find_one({"startup_name": selected_delete})
-                
+
                 st.markdown("---")
                 st.error(f"### You are about to delete: **{startup['startup_name']}**")
-                
+
                 col1, col2 = st.columns(2)
-                
+
                 with col1:
                     st.markdown(f"**Industry:** {startup.get('industry', 'N/A')}")
                     st.markdown(f"**Country:** {startup.get('country', 'N/A')}")
                     st.markdown(f"**Founded:** {startup.get('founded_year', 'N/A')}")
-                
+
                 with col2:
                     funding_rounds = startup.get('funding_rounds', [])
                     st.markdown(f"**Funding Rounds:** {len(funding_rounds)}")
                     total = sum(r.get('amount', 0) for r in funding_rounds)
                     st.markdown(f"**Total Funding:** ${total:,.0f}")
-                
+
                 st.markdown("---")
-                
+
                 # [AI] Confirmation
                 confirm = st.text_input(
                     "Type the startup name to confirm deletion:",
                     placeholder=selected_delete
                 )
-                
+
                 col1, col2 = st.columns([1, 3])
-                
+
                 with col1:
                     if st.button("🗑️ Confirm Delete", type="primary", disabled=(confirm != selected_delete)):
                         try:
@@ -540,7 +519,7 @@ elif page == "🗑️ Delete Startup":
                                 st.error("❌ Failed to delete startup")
                         except Exception as e:
                             st.error(f"❌ Error: {str(e)}")
-                
+
                 with col2:
                     if confirm != selected_delete and confirm:
                         st.warning("⚠️ Name doesn't match. Delete button disabled.")
