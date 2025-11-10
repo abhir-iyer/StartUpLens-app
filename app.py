@@ -4,8 +4,10 @@
 # AI Assistance: Application structure and Streamlit components created with
 # GitHub Copilot assistance, accessed on January 9, 2025
 #
-# NOTE: This build removes pandas (for Streamlit Cloud on Python 3.13) and
-# adds explicit TLS CA (certifi) for Atlas connections.
+# Notes:
+# - Lazy DB connection so the app always boots (health check won't crash).
+# - No pandas; charts use plotly.graph_objects with simple lists (deploy-safe).
+# - Explicit TLS CA (certifi) for MongoDB Atlas.
 
 import os
 from datetime import datetime
@@ -36,69 +38,73 @@ st.markdown(
 )
 
 
-# ===================== DATABASE =====================
-@st.cache_resource
-def get_database():
-    """Connect to MongoDB Atlas using Streamlit secrets or env, with explicit TLS CA."""
-    import certifi
+# ===================== DB HELPERS (LAZY, NON-FATAL) =====================
+def _read_mongo_uri():
+    """Read connection string from Streamlit secrets or env. Return None if missing."""
+    if hasattr(st, "secrets") and "mongo" in st.secrets and st.secrets["mongo"].get("uri"):
+        return st.secrets["mongo"]["uri"]
+    return os.getenv("MONGO_URI")
 
-    # Pull URI
-    if hasattr(st, "secrets") and "mongo" in st.secrets:
-        MONGO_URI = st.secrets["mongo"].get("uri")
-    else:
-        MONGO_URI = os.getenv("MONGO_URI")
 
-    if not MONGO_URI:
-        st.error("❌ MongoDB connection string not found!")
-        st.info("Add it to .streamlit/secrets.toml (local) or Streamlit Cloud → Secrets.")
-        st.stop()
-
+@st.cache_resource(show_spinner=False)
+def get_mongo_client(uri: str | None):
+    """Create a MongoClient or return None on failure. Never raise to keep app alive."""
+    if not uri:
+        return None
     try:
+        import certifi
         client = MongoClient(
-            MONGO_URI,
+            uri,
             tls=True,
             tlsCAFile=certifi.where(),
-            serverSelectionTimeoutMS=30000,
-            connectTimeoutMS=20000,
-            socketTimeoutMS=20000,
+            serverSelectionTimeoutMS=15000,
+            connectTimeoutMS=15000,
+            socketTimeoutMS=15000,
             appname="StartUpLens",
         )
-        # Verify TLS/network
+        # Touch server to validate connection; if it fails we return None.
         client.admin.command("ping")
-        # If DB not in URI, we default to this logical name:
-        db = client["StartUpLensDB"]
-        return db
-    except Exception as e:
-        st.error("❌ Database connection failed (TLS/DNS/Network).")
-        st.code(str(e))
-        st.info(
-            "Checklist:\n"
-            "• Atlas → Network Access: temporarily allow 0.0.0.0/0 for Streamlit Cloud.\n"
-            "• Use mongodb+srv:// URI, include /StartUpLensDB and ?retryWrites=true&w=majority&appName=StartUpLens.\n"
-            "• requirements.txt includes certifi and dnspython.\n"
-            "• Username/password are correct (URL-encode special characters)."
+        return client
+    except Exception:
+        return None
+
+
+def get_db():
+    """Return (db, error_message). If db is None, error_message explains what to fix."""
+    uri = _read_mongo_uri()
+    if not uri:
+        return None, (
+            "MongoDB connection string not found.\n\n"
+            "Add it in **.streamlit/secrets.toml** locally or in **Streamlit Cloud → Settings → Secrets**:\n"
+            "```toml\n[mongo]\nuri = \"mongodb+srv://USERNAME:PASSWORD@CLUSTER.mongodb.net/StartUpLensDB"
+            "?retryWrites=true&w=majority&appName=StartUpLens\" \n```"
         )
-        st.stop()
+
+    client = get_mongo_client(uri)
+    if client is None:
+        return None, (
+            "Could not connect to MongoDB Atlas.\n\nChecklist:\n"
+            "• Atlas → **Network Access**: temporarily allow `0.0.0.0/0`.\n"
+            "• Use an **SRV** URI (`mongodb+srv://`) that includes the DB name and options.\n"
+            "• Username/password correct (URL-encode special characters).\n"
+            "• `requirements.txt` includes `certifi` and `dnspython`."
+        )
+
+    # If no DB specified in URI, we default to logical DB name
+    return client.get_database("StartUpLensDB"), None
 
 
-db = get_database()
-startups_collection = db["startups"]
-investors_collection = db["investors"]
+# Predefine collections accessors (won't run until a page needs them)
+def get_collections_or_explain():
+    db, err = get_db()
+    if err:
+        st.error("❌ Database not available")
+        st.info(err)
+        return None, None
+    return db["startups"], db["investors"]
 
 
-# ===================== SIDEBAR NAV =====================
-st.sidebar.markdown("## 🚀 StartUpLens\n### Navigation")
-page = st.sidebar.radio(
-    "Go to:",
-    ["📊 Dashboard", "🔍 Search Startups", "➕ Add Startup", "✏️ Update Startup", "🗑️ Delete Startup"],
-    label_visibility="collapsed"
-)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Team Members:**\n\n• Abhir Iyer [AI]\n\n• Krishna Kishore [KK]\n\n• Nandini Patel [NP]")
-
-
-# ----------------- Helper funcs (no pandas) -----------------
+# ----------------- Small utils -----------------
 def agg_to_xy(records, key="_id", value="total"):
     """Convert a list of { '_id': ..., 'total': ... } to x,y lists for plotting."""
     x = [str(r.get(key, "unknown")) for r in records]
@@ -113,34 +119,61 @@ def safe_num(x, default=0.0):
         return default
 
 
+# ===================== SIDEBAR NAV =====================
+st.sidebar.markdown("## 🚀 StartUpLens\n### Navigation")
+page = st.sidebar.radio(
+    "Go to:",
+    ["📊 Dashboard", "🔍 Search Startups", "➕ Add Startup", "✏️ Update Startup", "🗑️ Delete Startup"],
+    label_visibility="collapsed"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Team Members:**\n\n• Abhir Iyer [AI]\n\n• Krishna Kishore [KK]\n\n• Nandini Patel [NP]")
+
+
 # ===================== PAGE: DASHBOARD =====================
 if page == "📊 Dashboard":
     st.markdown('<p class="main-header">📊 StartUpLens Dashboard</p>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Exploring Global Startup Funding Networks</p>', unsafe_allow_html=True)
 
+    startups_collection, _ = get_collections_or_explain()
+    if startups_collection is None:
+        st.warning("Dashboard will populate automatically once the database is reachable.")
+        st.stop()
+
     # Metrics
     col1, col2, col3, col4 = st.columns(4)
-
     with col1:
-        total_startups = startups_collection.estimated_document_count()
+        try:
+            total_startups = startups_collection.estimated_document_count()
+        except Exception:
+            total_startups = 0
         st.metric("Total Startups", f"{total_startups:,}")
 
     with col2:
-        # Sum of funding_rounds.amount
         pipeline_total = [
             {"$unwind": "$funding_rounds"},
             {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$funding_rounds.amount", 0]}}}}
         ]
-        res_total = list(startups_collection.aggregate(pipeline_total))
-        total_funding = res_total[0]["total"] if res_total else 0
+        try:
+            res_total = list(startups_collection.aggregate(pipeline_total))
+            total_funding = res_total[0]["total"] if res_total else 0
+        except Exception:
+            total_funding = 0
         st.metric("Total Funding", f"${total_funding/1e9:.2f}B")
 
     with col3:
-        industries = [i for i in startups_collection.distinct("industry") if i]
+        try:
+            industries = [i for i in startups_collection.distinct("industry") if i]
+        except Exception:
+            industries = []
         st.metric("Industries", len(industries))
 
     with col4:
-        countries = [c for c in startups_collection.distinct("country") if c]
+        try:
+            countries = [c for c in startups_collection.distinct("country") if c]
+        except Exception:
+            countries = []
         st.metric("Countries", len(countries))
 
     st.markdown("---")
@@ -156,20 +189,18 @@ if page == "📊 Dashboard":
         {"$sort": {"total": -1}},
         {"$limit": 10},
     ]
-    industry_data = list(startups_collection.aggregate(pipeline_industry))
+    try:
+        industry_data = list(startups_collection.aggregate(pipeline_industry))
+    except Exception:
+        industry_data = []
     if industry_data:
         x, y = agg_to_xy(industry_data, key="_id", value="total")
         y_bil = [v / 1e9 for v in y]
-        fig1 = go.Figure(
-            data=[go.Bar(x=x, y=y_bil, marker=dict(color=y_bil, colorscale="Blues"))]
-        )
+        fig1 = go.Figure(data=[go.Bar(x=x, y=y_bil, marker=dict(color=y_bil, colorscale="Blues"))])
         fig1.update_layout(
             title="Top 10 Industries by Total Funding ($B)",
-            xaxis_title="Industry",
-            yaxis_title="Total Raised ($B)",
-            height=420,
-            showlegend=False,
-            margin=dict(l=20, r=20, t=60, b=20),
+            xaxis_title="Industry", yaxis_title="Total Raised ($B)",
+            height=420, showlegend=False, margin=dict(l=20, r=20, t=60, b=20),
         )
         st.plotly_chart(fig1, use_container_width=True)
 
@@ -186,19 +217,18 @@ if page == "📊 Dashboard":
             {"$sort": {"_id": 1}},
             {"$limit": 30},
         ]
-        yearly_data = list(startups_collection.aggregate(pipeline_yearly))
+        try:
+            yearly_data = list(startups_collection.aggregate(pipeline_yearly))
+        except Exception:
+            yearly_data = []
         if yearly_data:
             years, totals = agg_to_xy(yearly_data, key="_id", value="total")
             totals_bil = [t / 1e9 for t in totals]
-            fig2 = go.Figure(
-                data=[go.Scatter(x=years, y=totals_bil, mode="lines+markers")]
-            )
+            fig2 = go.Figure(data=[go.Scatter(x=years, y=totals_bil, mode="lines+markers")])
             fig2.update_layout(
                 title="Total Funding Over Time ($B)",
-                xaxis_title="Year",
-                yaxis_title="Total ($B)",
-                height=360,
-                margin=dict(l=20, r=20, t=60, b=20),
+                xaxis_title="Year", yaxis_title="Total ($B)",
+                height=360, margin=dict(l=20, r=20, t=60, b=20),
             )
             st.plotly_chart(fig2, use_container_width=True)
 
@@ -213,7 +243,10 @@ if page == "📊 Dashboard":
             {"$sort": {"total": -1}},
             {"$limit": 10},
         ]
-        country_data = list(startups_collection.aggregate(pipeline_country))
+        try:
+            country_data = list(startups_collection.aggregate(pipeline_country))
+        except Exception:
+            country_data = []
         if country_data:
             countries_x, totals_y = agg_to_xy(country_data, key="_id", value="total")
             totals_bil = [t / 1e9 for t in totals_y]
@@ -223,11 +256,8 @@ if page == "📊 Dashboard":
             )
             fig3.update_layout(
                 title="Top Countries by Total Funding ($B)",
-                xaxis_title="Total ($B)",
-                yaxis_title="Country",
-                height=360,
-                showlegend=False,
-                margin=dict(l=20, r=20, t=60, b=20),
+                xaxis_title="Total ($B)", yaxis_title="Country",
+                height=360, showlegend=False, margin=dict(l=20, r=20, t=60, b=20),
             )
             st.plotly_chart(fig3, use_container_width=True)
 
@@ -242,17 +272,17 @@ if page == "📊 Dashboard":
         {"$sort": {"count": -1}},
         {"$limit": 8},
     ]
-    round_data = list(startups_collection.aggregate(pipeline_rounds))
+    try:
+        round_data = list(startups_collection.aggregate(pipeline_rounds))
+    except Exception:
+        round_data = []
     if round_data:
         labels = [r.get("_id", "unknown") for r in round_data]
         values = [int(r.get("count", 0) or 0) for r in round_data]
-        fig4 = go.Figure(
-            data=[go.Pie(labels=labels, values=values, hole=0.4)]
-        )
+        fig4 = go.Figure(data=[go.Pie(labels=labels, values=values, hole=0.4)])
         fig4.update_layout(
             title="Distribution of Funding Round Types",
-            height=420,
-            margin=dict(l=20, r=20, t=60, b=20),
+            height=420, margin=dict(l=20, r=20, t=60, b=20),
         )
         st.plotly_chart(fig4, use_container_width=True)
 
@@ -260,15 +290,24 @@ if page == "📊 Dashboard":
 # ===================== PAGE: SEARCH =====================
 elif page == "🔍 Search Startups":
     st.markdown('<p class="main-header">🔍 Search Startups</p>', unsafe_allow_html=True)
+    startups_collection, _ = get_collections_or_explain()
+    if startups_collection is None:
+        st.stop()
 
     col1, col2, col3 = st.columns(3)
     with col1:
         search_name = st.text_input("🔎 Search by Name", placeholder="Enter startup name...")
     with col2:
-        industry_opts = ["All"] + sorted([i for i in startups_collection.distinct("industry") if i])
+        try:
+            industry_opts = ["All"] + sorted([i for i in startups_collection.distinct("industry") if i])
+        except Exception:
+            industry_opts = ["All"]
         selected_industry = st.selectbox("Industry Filter", industry_opts)
     with col3:
-        country_opts = ["All"] + sorted([c for c in startups_collection.distinct("country") if c])
+        try:
+            country_opts = ["All"] + sorted([c for c in startups_collection.distinct("country") if c])
+        except Exception:
+            country_opts = ["All"]
         selected_country = st.selectbox("Country Filter", country_opts)
 
     query = {}
@@ -279,9 +318,12 @@ elif page == "🔍 Search Startups":
     if selected_country != "All":
         query["country"] = selected_country
 
-    results = list(startups_collection.find(query).limit(50))
-    st.markdown(f"### Found {len(results)} startups")
+    try:
+        results = list(startups_collection.find(query).limit(50))
+    except Exception:
+        results = []
 
+    st.markdown(f"### Found {len(results)} startups")
     if results:
         for s in results:
             title = f"🚀 {s.get('startup_name', 'Unknown')} - {s.get('industry', 'N/A')}"
@@ -310,6 +352,9 @@ elif page == "🔍 Search Startups":
 # ===================== PAGE: ADD =====================
 elif page == "➕ Add Startup":
     st.markdown('<p class="main-header">➕ Add New Startup</p>', unsafe_allow_html=True)
+    startups_collection, _ = get_collections_or_explain()
+    if startups_collection is None:
+        st.stop()
 
     with st.form("add_startup_form"):
         st.subheader("Basic Information")
@@ -369,12 +414,18 @@ elif page == "➕ Add Startup":
 # ===================== PAGE: UPDATE =====================
 elif page == "✏️ Update Startup":
     st.markdown('<p class="main-header">✏️ Update Startup</p>', unsafe_allow_html=True)
+    startups_collection, _ = get_collections_or_explain()
+    if startups_collection is None:
+        st.stop()
 
     search_update = st.text_input("🔎 Search startup to update", placeholder="Enter startup name...")
     if search_update:
-        matches = list(startups_collection.find(
-            {"startup_name": {"$regex": search_update, "$options": "i"}}, limit=10
-        ))
+        try:
+            matches = list(startups_collection.find(
+                {"startup_name": {"$regex": search_update, "$options": "i"}}, limit=10
+            ))
+        except Exception:
+            matches = []
         if matches:
             names = [m["startup_name"] for m in matches]
             selected = st.selectbox("Select Startup", names)
@@ -439,12 +490,18 @@ elif page == "✏️ Update Startup":
 elif page == "🗑️ Delete Startup":
     st.markdown('<p class="main-header">🗑️ Delete Startup</p>', unsafe_allow_html=True)
     st.warning("⚠️ **Warning:** This action cannot be undone!")
+    startups_collection, _ = get_collections_or_explain()
+    if startups_collection is None:
+        st.stop()
 
     search_delete = st.text_input("🔎 Search startup to delete", placeholder="Enter startup name...")
     if search_delete:
-        matches = list(startups_collection.find(
-            {"startup_name": {"$regex": search_delete, "$options": "i"}}, limit=10
-        ))
+        try:
+            matches = list(startups_collection.find(
+                {"startup_name": {"$regex": search_delete, "$options": "i"}}, limit=10
+            ))
+        except Exception:
+            matches = []
         if matches:
             names = [m["startup_name"] for m in matches]
             selected = st.selectbox("Select Startup to Delete", [""] + names)
